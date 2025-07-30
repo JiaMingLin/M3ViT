@@ -1,0 +1,25 @@
+name: m3vit
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+    #  - matplotlib
+  - numpy
+  - pyyaml
+  - easydict
+  - termcolor
+  - imageio
+  - scikit-image
+  - opencv
+  - pip:
+      - --extra-index-url=https://download.pytorch.org/whl/cu121
+      - torch==2.1.1+cu121
+      - torchvision==0.16.1+cu121
+      - torchaudio==2.1.1
+      - timm
+      - mmcv
+      - thop
+      - dm-tree
+        #      - Pillow==6.1

@@ -82,7 +82,8 @@ parser.add_argument("--launcher",
         default="pytorch",
         help="job launcher",
     )
-parser.add_argument("--local_rank", type=int, default=-1)
+#parser.add_argument("--local_rank", type=int, default=-1)
+parser.add_argument('--local_rank', '--local-rank', dest='local_rank', type=int, default=-1)
 parser.add_argument('--seed', type=int, default=0, help='random seed')
 parser.add_argument(
         '--deterministic',
@@ -146,6 +147,7 @@ parser.add_argument('--tam_level2',default=None, type=str2bool, help='use tamlev
 
 parser.add_argument('--resume', default='', help='resume from checkpoint')
 parser.add_argument('--time', action='store_true', help='if wanna get inference time')
+
 args = parser.parse_args()
 
 if args.task_one_hot:
