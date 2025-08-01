@@ -183,10 +183,21 @@ class FMoETransformerMLP(FMoE):
 
     def forward_moe(self, gate_inp, moe_inp, task_id=None, sem=None):
         r"""
-        The FMoE module first computes gate output, and then conduct MoE forward
-        according to the gate.  The score of the selected gate given by the
-        expert is multiplied to the experts' output tensors as a weight.
+        MoE（Mixture of Experts）前向傳播的核心方法
+        
+        流程說明：
+        1. 透過 gate 模組計算 expert 選擇分數
+        2. 根據 gate 分數進行 MoE 前向計算
+        3. 將 gate 分數作為權重乘以各 expert 的輸出
+        
+        參數：
+            gate_inp: 輸入給 gate 模組的資料，用於計算 expert 選擇
+            moe_inp: 輸入給 expert 的資料，用於實際計算
+            task_id: 任務 ID，用於多任務學習
+            sem: 語義資訊，用於語義感知的 expert 選擇
         """
+        # === 步驟 1：輸入驗證 ===
+        # 檢查所有輸入張量的 batch size 是否一致
         moe_inp_batch_size = tree.flatten(
             tree.map_structure(lambda tensor: tensor.shape[0], moe_inp)
         )
@@ -194,15 +205,18 @@ class FMoETransformerMLP(FMoE):
             [batch_size == moe_inp_batch_size[0] for batch_size in moe_inp_batch_size]
         ), "MoE inputs must have the same batch size"
 
+        # === 步驟 2：分散式訓練設置 ===
+        # 如果使用多個 GPU，確保張量在正確的通信群組中
         if self.world_size > 1:
-
             def ensure_comm_func(tensor):
                 ensure_comm(tensor, self.moe_group)
 
             tree.map_structure(ensure_comm_func, moe_inp)
             tree.map_structure(ensure_comm_func, gate_inp)
+            
+        # === 步驟 3：數據切片處理 ===
+        # 如果啟用數據切片，將輸入按切片大小分割
         if self.slice_size > 1:
-
             def slice_func(tensor):
                 return Slice.apply(
                     tensor, self.slice_rank, self.slice_size, self.slice_group
@@ -210,41 +224,64 @@ class FMoETransformerMLP(FMoE):
 
             moe_inp = tree.map_structure(slice_func, moe_inp)
 
-        if (task_id is not None) and self.multi_gate:
-            # print('in custom moe_layer,task_id',task_id)
-            gate_top_k_idx, gate_score = self.gate[task_id](gate_inp)
+        # === 步驟 4：Gate 計算 - 選擇 top-k experts ===
+        if self.multi_gate:
+            # 多 gate 模式：針對不同任務使用不同的 gate
+            if task_id is not None:
+                # 使用指定任務的 gate
+                gate_top_k_idx, gate_score = self.gate[task_id](gate_inp)
+            else:
+                # 如果沒有指定任務 ID，使用第一個 gate
+                gate_top_k_idx, gate_score = self.gate[0](gate_inp)
         else:
-            gate_top_k_idx, gate_score = self.gate(gate_inp, task_id=task_id,sem=sem)
+            # 單 gate 模式：根據 gate 類型傳遞不同參數
+            if isinstance(self.gate, NoisyGate_VMoE):
+                # NoisyGate_VMoE 支援 task_id 和 sem 參數
+                gate_top_k_idx, gate_score = self.gate(gate_inp, task_id=task_id, sem=sem)
+            else:
+                # NoisyGate 只接受輸入參數
+                gate_top_k_idx, gate_score = self.gate(gate_inp)
 
+        # === 步驟 5：Expert 剪枝 ===
+        # 如果啟用 expert 剪枝，將低於閾值的分數設為 0
         if self.expert_prune:
-            gate_score = torch.where(gate_score>self.prune_threshold,gate_score,0.)
+            gate_score = torch.where(gate_score>self.prune_threshold, gate_score, 0.)
             prune_prob = 1-torch.nonzero(gate_score).shape[0]/torch.cumprod(torch.tensor(gate_score.shape),dim=0)[-1]
-            print('prune_prob',prune_prob)
+            print('prune_prob', prune_prob)
+            
+        # === 步驟 6：語義強制設置 ===
+        # 根據語義資訊強制選擇特定的 expert
         if self.sem_force and (sem is not None):
             batch = sem.shape[0]
-            gate_top_k_idx = gate_top_k_idx.reshape(batch,-1,self.top_k)
-            sem = sem.reshape(batch,-1)
+            gate_top_k_idx = gate_top_k_idx.reshape(batch, -1, self.top_k)
+            sem = sem.reshape(batch, -1)
+            # 遍歷每個 batch 和每個位置，根據語義強制選擇 expert
             for k in range(batch):
                 for i in range(sem.shape[-1]):
                     for j in range(len(self.force_id)):
                         if sem[k,i] in self.force_id[j]:
-                            gate_top_k_idx[k,i+1,:]=[j*2,j*2+1]
-            gate_top_k_idx = gate_top_k_idx.reshape(-1,self.top_k)
-            gate_score =  torch.ones((gate_score.shape[0],self.top_k),device=gate_score.device)*0.5
+                            # 強制選擇特定的 expert 對
+                            gate_top_k_idx[k,i+1,:] = [j*2, j*2+1]
+            gate_top_k_idx = gate_top_k_idx.reshape(-1, self.top_k)
+            # 設置均等的 gate 分數
+            gate_score = torch.ones((gate_score.shape[0], self.top_k), device=gate_score.device) * 0.5
 
-
+        # === 步驟 7：任務特定的 Expert 調整 ===
+        # 如果啟用任務特定的 expert 分配，調整 expert 索引
         if self.regu_experts_fromtask and (task_id is not None):
-            # print('task_id',self.start_experts_id[task_id],task_id)
+            # 將 expert 索引偏移到該任務對應的 expert 範圍
             gate_top_k_idx = gate_top_k_idx + self.start_experts_id[task_id]
 
+        # === 步驟 8：Gate Hook ===
+        # 如果設置了 gate hook，執行額外的處理
         if self.gate_hook is not None:
             self.gate_hook(gate_top_k_idx, gate_score, None)
 
-        # delete masked tensors
+        # === 步驟 9：遮罩處理 ===
+        # 刪除被遮罩的張量（用於處理變長序列）
         if self.mask is not None and self.mask_dict is not None:
-            # TODO: to fix
             def delete_mask_func(tensor):
-                # to: (BxL') x d_model
+                # 只保留未被遮罩的元素
                 tensor = tensor[mask == 0, :]
                 return tensor
 
@@ -252,18 +289,20 @@ class FMoETransformerMLP(FMoE):
             moe_inp = tree.map_structure(delete_mask_func, moe_inp)
             gate_top_k_idx = gate_top_k_idx[mask == 0, :]
 
+        # === 步驟 10：MoE 前向計算核心 ===
+        # 執行實際的 expert 計算
         fwd = _fmoe_general_global_forward(
             moe_inp, gate_top_k_idx, self.expert_fn, self.num_expert, self.world_size
         )
 
-        # recover deleted tensors
+        # === 步驟 11：遮罩恢復 ===
+        # 恢復被刪除的張量，填入對應的值
         if self.mask is not None and self.mask_dict is not None:
-
             def recover_func(tensor):
-                # to: (BxL') x top_k x dim
+                # 重塑為 (batch_size * seq_len, top_k, dim) 格式
                 dim = tensor.shape[-1]
                 tensor = tensor.view(-1, self.top_k, dim)
-                # to: (BxL) x top_k x d_model
+                # 創建完整大小的零張量
                 x = torch.zeros(
                     mask.shape[0],
                     self.top_k,
@@ -271,15 +310,16 @@ class FMoETransformerMLP(FMoE):
                     device=tensor.device,
                     dtype=tensor.dtype,
                 )
-                # recover
+                # 恢復未遮罩的位置
                 x[mask == 0] = tensor
+                # 填入遮罩位置的預設值
                 for k, v in self.mask_dict.items():
                     x[mask == k] = v
                 return x
 
             moe_outp = tree.map_structure(recover_func, fwd)
         else:
-
+            # 如果沒有遮罩，直接重塑張量
             def view_func(tensor):
                 dim = tensor.shape[-1]
                 tensor = tensor.view(-1, self.top_k, dim)
@@ -287,17 +327,21 @@ class FMoETransformerMLP(FMoE):
 
             moe_outp = tree.map_structure(view_func, fwd)
 
+        # === 步驟 12：Gate 分數加權 ===
+        # 將 gate 分數作為權重應用到 expert 輸出上
         gate_score = gate_score.view(-1, 1, self.top_k)
 
         def bmm_func(tensor):
+            # 使用批次矩陣乘法將 gate 分數與 expert 輸出相乘
             dim = tensor.shape[-1]
             tensor = torch.bmm(gate_score, tensor).reshape(-1, dim)
             return tensor
 
         moe_outp = tree.map_structure(bmm_func, moe_outp)
 
+        # === 步驟 13：數據切片聚合 ===
+        # 如果使用了數據切片，將結果聚合回來
         if self.slice_size > 1:
-
             def all_gather_func(tensor):
                 return AllGather.apply(
                     tensor, self.slice_rank, self.slice_size, self.slice_group
@@ -305,10 +349,13 @@ class FMoETransformerMLP(FMoE):
 
             moe_outp = tree.map_structure(all_gather_func, moe_outp)
 
+        # === 步驟 14：輸出驗證 ===
+        # 確保輸出張量的 batch size 一致
         moe_outp_batch_size = tree.flatten(
             tree.map_structure(lambda tensor: tensor.shape[0], moe_outp)
         )
         assert all(
             [batch_size == moe_outp_batch_size[0] for batch_size in moe_outp_batch_size]
         ), "MoE outputs must have the same batch size"
+        
         return moe_outp

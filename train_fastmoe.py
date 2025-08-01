@@ -401,7 +401,54 @@ def main():
         start_epoch = 0
         if args.distributed:
             torch.distributed.barrier()
-        best_result = {'multi_task_performance':-200}  
+        
+        # 根據實驗設置初始化 best_result
+        if p['setup'] == 'single_task':
+            # 單任務模式：只初始化當前任務的性能指標
+            task = p.TASKS.NAMES[0]  # 單任務只有一個任務
+            
+            if task == 'depth':
+                best_result = {'depth': {'rmse': 999.0, 'log_rmse': 999.0}}
+            elif task == 'semseg':
+                best_result = {'semseg': {'mIoU': 0.0}}
+            elif task == 'normals':
+                best_result = {'normals': {'mean': 999.0}}
+            elif task == 'human_parts':
+                best_result = {'human_parts': {'mIoU': 0.0}}
+            elif task == 'sal':
+                best_result = {'sal': {'mIoU': 0.0}}
+            elif task == 'edge':
+                best_result = {'edge': {'odsF': 0.0}}
+            else:
+                raise NotImplementedError(f"Unknown single task: {task}")
+                
+            print(f"Initialized best_result for single task '{task}': {best_result}")
+            
+        elif p['setup'] == 'multi_task':
+            # 多任務模式：初始化所有任務的性能指標
+            best_result = {'multi_task_performance': -200}
+            
+            for task in p.TASKS.NAMES:
+                if task == 'depth':
+                    best_result[task] = {'rmse': 999.0, 'log_rmse': 999.0}
+                elif task == 'semseg':
+                    best_result[task] = {'mIoU': 0.0}
+                elif task == 'normals':
+                    best_result[task] = {'mean': 999.0}
+                elif task == 'human_parts':
+                    best_result[task] = {'mIoU': 0.0}
+                elif task == 'sal':
+                    best_result[task] = {'mIoU': 0.0}
+                elif task == 'edge':
+                    best_result[task] = {'odsF': 0.0}
+                else:
+                    print(f"Warning: Unknown task '{task}', skipping initialization")
+                    
+            print(f"Initialized best_result for multi-task with tasks: {p.TASKS.NAMES}")
+            print(f"Task keys in best_result: {[k for k in best_result.keys() if k != 'multi_task_performance']}")
+            
+        else:
+            raise NotImplementedError(f"Unknown setup: {p['setup']}")  
     
     # Main loop
     print(colored('Starting main loop', 'blue'))

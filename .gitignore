@@ -98,3 +98,6 @@ dataset/*
 
 output*
 output/*
+
+fastmoe*
+fastmoe/*

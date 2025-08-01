@@ -4,8 +4,8 @@ setup: single_task
 # Database
 train_db_name: NYUD
 val_db_name: NYUD 
-trBatch: 8
-valBatch: 8
+trBatch: 1
+valBatch: 1
 nworkers: 4
 
 # Optimizer and scheduler

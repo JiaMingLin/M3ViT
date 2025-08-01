@@ -15,7 +15,8 @@ RUN apt-get update && \
     build-essential \
     cmake \
     libgl1 \
-    libglib2.0-0 && \
+    libglib2.0-0 \
+    autoconf automake libtool && \
     # Pillow compile dependencies
     apt-get install -y \
     zlib1g-dev \
@@ -49,12 +50,13 @@ RUN pip install \
     easydict \
     termcolor \
     h5py \
-    mmcv \
+    mmcv==1.7.1 \
     thop \
     dm-tree \
     timm==0.6.13 \
     Pillow==6.1 \
-    opencv-python
+    opencv-python==4.7.0.72 && \
+    pip install "numpy<2"
 
 # Download and extract LibTorch 2.1.2+cu121
 RUN wget https://download.pytorch.org/libtorch/test/cu121/libtorch-shared-with-deps-2.1.2%2Bcu121.zip -O libtorch.zip && \
@@ -66,10 +68,22 @@ ENV LIBTORCH_PATH=/opt/libtorch
 ENV CPLUS_INCLUDE_PATH=$LIBTORCH_PATH/include:$LIBTORCH_PATH/include/torch/csrc:$LIBTORCH_PATH/include/torch/csrc/distributed
 
 # Set workdir and clone your FastMoE repo, then checkout specific commit
-WORKDIR /workspace
+WORKDIR /app
 RUN git clone https://github.com/JiaMingLin/fastmoe.git && \
     cd fastmoe && \
-    git checkout jmlin-dev && \
+    git checkout pytorch2-compat && \
     python setup.py install
 
-CMD ["/bin/bash"]
+RUN echo '#!/bin/bash\n' \
+    'echo "==> Listing /app contents:"\n' \
+    'ls -alh /app\n' \
+    'echo ""\n' \
+    'if [[ ! -x "/app/start.sh" ]]; then\n' \
+    '  echo "❌ ERROR: start.sh not found or not executable in /app!" >&2\n' \
+    '  exit 1\n' \
+    'fi\n' \
+    'echo "🚀 Launching /app/start.sh..."\n' \
+    '/app/start.sh' > /entrypoint.sh && chmod +x /entrypoint.sh
+
+#CMD ["/bin/bash"]
+ENTRYPOINT ["/entrypoint.sh"]
