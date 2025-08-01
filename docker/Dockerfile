@@ -16,9 +16,7 @@ RUN apt-get update && \
     cmake \
     libgl1 \
     libglib2.0-0 \
-    autoconf automake libtool && \
-    # Pillow compile dependencies
-    apt-get install -y \
+    autoconf automake libtool \
     zlib1g-dev \
     libjpeg-dev \
     libpng-dev \
@@ -36,14 +34,13 @@ RUN curl -O https://bootstrap.pypa.io/get-pip.py && \
     python3.10 get-pip.py && \
     rm get-pip.py
 
-# Create symlinks for convenience
+# Create symlinks
 RUN ln -s /usr/bin/python3.10 /usr/bin/python && \
     ln -s $(which pip3) /usr/bin/pip
 
-# Install Python packages and PyTorch (CUDA 12.1)
-RUN pip install \
-    torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu121 && \
-    pip install \
+# === 安裝 Python 套件，並避免 pip cache 打包進 image ===
+RUN pip install --no-cache-dir torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu121 && \
+    pip install --no-cache-dir \
     imageio \
     scikit-image \
     pyyaml \
@@ -56,24 +53,27 @@ RUN pip install \
     timm==0.6.13 \
     Pillow==6.1 \
     opencv-python==4.7.0.72 && \
-    pip install "numpy<2"
+    pip install --no-cache-dir "numpy<2" && \
+    # 額外刪除 pip 暫存與 http cache
+    rm -rf /root/.cache/pip /root/.cache/http /root/.cache/* || true
 
 # Download and extract LibTorch 2.1.2+cu121
 RUN wget https://download.pytorch.org/libtorch/test/cu121/libtorch-shared-with-deps-2.1.2%2Bcu121.zip -O libtorch.zip && \
     unzip libtorch.zip -d /opt && \
     rm libtorch.zip
 
-# Set libtorch headers for FastMoE
 ENV LIBTORCH_PATH=/opt/libtorch
 ENV CPLUS_INCLUDE_PATH=$LIBTORCH_PATH/include:$LIBTORCH_PATH/include/torch/csrc:$LIBTORCH_PATH/include/torch/csrc/distributed
 
-# Set workdir and clone your FastMoE repo, then checkout specific commit
+# Set workdir and install FastMoE
 WORKDIR /app
 RUN git clone https://github.com/JiaMingLin/fastmoe.git && \
     cd fastmoe && \
     git checkout pytorch2-compat && \
-    python setup.py install
+    python setup.py install && \
+    cd .. && rm -rf /root/.cache/pip /root/.cache/http /root/.cache/* || true
 
+# Entrypoint
 RUN echo '#!/bin/bash\n' \
     'echo "==> Listing /app contents:"\n' \
     'ls -alh /app\n' \
@@ -85,5 +85,4 @@ RUN echo '#!/bin/bash\n' \
     'echo "🚀 Launching /app/start.sh..."\n' \
     '/app/start.sh' > /entrypoint.sh && chmod +x /entrypoint.sh
 
-#CMD ["/bin/bash"]
 ENTRYPOINT ["/entrypoint.sh"]
